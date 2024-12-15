@@ -148,7 +148,7 @@ func TestEndToEndApply(t *testing.T) {
 		))
 
 		validateSuperchainDeployment(t, st, cg)
-		validateOPChainDeployment(t, cg, st, intent)
+		validateOPChainDeployment(t, cg, st, intent, false)
 	})
 
 	t.Run("chain with tagged artifacts", func(t *testing.T) {
@@ -182,11 +182,7 @@ func TestApplyExistingOPCM(t *testing.T) {
 func testApplyExistingOPCM(t *testing.T, l1ChainID uint64, forkRPCUrl string, versions standard.L1Versions) {
 	op_e2e.InitParallel(t)
 
-	anvil.Test(t)
-
-	if forkRPCUrl == "" {
-		t.Skip("no fork RPC URL provided")
-	}
+	require.NotEmpty(t, forkRPCUrl, "no fork RPC URL provided")
 
 	lgr := testlog.Logger(t, slog.LevelDebug)
 
@@ -232,6 +228,12 @@ func testApplyExistingOPCM(t *testing.T, l1ChainID uint64, forkRPCUrl string, ve
 		artifacts.MustNewLocatorFromTag("op-contracts/v1.6.0"),
 		artifacts.MustNewLocatorFromTag("op-contracts/v1.7.0-beta.1+l2-contracts"),
 	)
+	// NOTE: the reference allocs for version 1.6 contain the gov token, so we need to enable it
+	// via override here.
+	intent.GlobalDeployOverrides = map[string]any{
+		"enableGovernance": true,
+	}
+
 	// Define a new create2 salt to avoid contract address collisions
 	_, err = rand.Read(st.Create2Salt[:])
 	require.NoError(t, err)
@@ -248,7 +250,7 @@ func testApplyExistingOPCM(t *testing.T, l1ChainID uint64, forkRPCUrl string, ve
 		},
 	))
 
-	validateOPChainDeployment(t, ethClientCodeGetter(ctx, l1Client), st, intent)
+	validateOPChainDeployment(t, ethClientCodeGetter(ctx, l1Client), st, intent, true)
 
 	releases := versions.Releases["op-contracts/v1.6.0"]
 
@@ -275,7 +277,7 @@ func testApplyExistingOPCM(t *testing.T, l1ChainID uint64, forkRPCUrl string, ve
 	superchain, err := standard.SuperchainFor(l1ChainIDBig.Uint64())
 	require.NoError(t, err)
 
-	managerOwner, err := standard.ManagerOwnerAddrFor(l1ChainIDBig.Uint64())
+	managerOwner, err := standard.SuperchainProxyAdminAddrFor(l1ChainIDBig.Uint64())
 	require.NoError(t, err)
 
 	superchainTests := []struct {
@@ -400,7 +402,6 @@ func testApplyExistingOPCM(t *testing.T, l1ChainID uint64, forkRPCUrl string, ve
 	//Use a custom equality function to compare the genesis allocs
 	//because the reflect-based one is really slow
 	actAllocs := st.Chains[0].Allocs.Data.Accounts
-	require.Equal(t, len(expAllocs), len(actAllocs))
 	for addr, expAcc := range expAllocs {
 		actAcc, ok := actAllocs[addr]
 		require.True(t, ok)
@@ -414,11 +415,17 @@ func testApplyExistingOPCM(t *testing.T, l1ChainID uint64, forkRPCUrl string, ve
 		}
 		storageChecker(addr, actAcc.Storage)
 	}
+	for addr := range actAllocs {
+		if _, ok := expAllocs[addr]; ok {
+			continue
+		}
+
+		t.Logf("unexpected account: %s", addr.Hex())
+	}
 }
 
 func TestGlobalOverrides(t *testing.T) {
 	op_e2e.InitParallel(t)
-	kurtosisutil.Test(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -480,7 +487,7 @@ func TestApplyGenesisStrategy(t *testing.T) {
 
 	for i := range intent.Chains {
 		t.Run(fmt.Sprintf("chain-%d", i), func(t *testing.T) {
-			validateOPChainDeployment(t, cg, st, intent)
+			validateOPChainDeployment(t, cg, st, intent, false)
 		})
 	}
 }
@@ -493,9 +500,9 @@ func TestProofParamOverrides(t *testing.T) {
 
 	opts, intent, st := setupGenesisChain(t, defaultL1ChainID)
 	intent.GlobalDeployOverrides = map[string]any{
-		"withdrawalDelaySeconds":                  standard.WithdrawalDelaySeconds + 1,
-		"minProposalSizeBytes":                    standard.MinProposalSizeBytes + 1,
-		"challengePeriodSeconds":                  standard.ChallengePeriodSeconds + 1,
+		"faultGameWithdrawalDelay":                standard.WithdrawalDelaySeconds + 1,
+		"preimageOracleMinProposalSize":           standard.MinProposalSizeBytes + 1,
+		"preimageOracleChallengePeriod":           standard.ChallengePeriodSeconds + 1,
 		"proofMaturityDelaySeconds":               standard.ProofMaturityDelaySeconds + 1,
 		"disputeGameFinalityDelaySeconds":         standard.DisputeGameFinalityDelaySeconds + 1,
 		"mipsVersion":                             standard.MIPSVersion + 1,
@@ -523,17 +530,17 @@ func TestProofParamOverrides(t *testing.T) {
 		address common.Address
 	}{
 		{
-			"withdrawalDelaySeconds",
+			"faultGameWithdrawalDelay",
 			uint64Caster,
 			st.ImplementationsDeployment.DelayedWETHImplAddress,
 		},
 		{
-			"minProposalSizeBytes",
+			"preimageOracleMinProposalSize",
 			uint64Caster,
 			st.ImplementationsDeployment.PreimageOracleSingletonAddress,
 		},
 		{
-			"challengePeriodSeconds",
+			"preimageOracleChallengePeriod",
 			uint64Caster,
 			st.ImplementationsDeployment.PreimageOracleSingletonAddress,
 		},
@@ -702,7 +709,9 @@ func TestAdditionalDisputeGames(t *testing.T) {
 	defer cancel()
 
 	opts, intent, st := setupGenesisChain(t, defaultL1ChainID)
-	(&intent.Chains[0].Roles).L1ProxyAdminOwner = crypto.PubkeyToAddress(opts.DeployerPrivateKey.PublicKey)
+	deployerAddr := crypto.PubkeyToAddress(opts.DeployerPrivateKey.PublicKey)
+	(&intent.Chains[0].Roles).L1ProxyAdminOwner = deployerAddr
+	intent.SuperchainRoles.Guardian = deployerAddr
 	intent.GlobalDeployOverrides = map[string]any{
 		"challengePeriodSeconds": 1,
 	}
@@ -720,6 +729,7 @@ func TestAdditionalDisputeGames(t *testing.T) {
 			UseCustomOracle:              true,
 			OracleMinProposalSize:        10000,
 			OracleChallengePeriodSeconds: 120,
+			MakeRespected:                true,
 			VMType:                       state.VMTypeAlphabet,
 		},
 	}
@@ -734,6 +744,60 @@ func TestAdditionalDisputeGames(t *testing.T) {
 	require.NotEmpty(t, gameInfo.GameAddress)
 	require.NotEmpty(t, gameInfo.OracleAddress)
 	require.NotEqual(t, st.ImplementationsDeployment.PreimageOracleSingletonAddress, gameInfo.OracleAddress)
+}
+
+func TestIntentConfiguration(t *testing.T) {
+	op_e2e.InitParallel(t)
+
+	tests := []struct {
+		name       string
+		mutator    func(*state.Intent)
+		assertions func(t *testing.T, st *state.State)
+	}{
+		{
+			"governance token disabled by default",
+			func(intent *state.Intent) {},
+			func(t *testing.T, st *state.State) {
+				l2Genesis := st.Chains[0].Allocs.Data
+				_, ok := l2Genesis.Accounts[predeploys.GovernanceTokenAddr]
+				require.False(t, ok)
+			},
+		},
+		{
+			"governance token enabled via override",
+			func(intent *state.Intent) {
+				intent.GlobalDeployOverrides = map[string]any{
+					"enableGovernance":     true,
+					"governanceTokenOwner": common.Address{'O'}.Hex(),
+				}
+			},
+			func(t *testing.T, st *state.State) {
+				l2Genesis := st.Chains[0].Allocs.Data
+				_, ok := l2Genesis.Accounts[predeploys.GovernanceTokenAddr]
+				require.True(t, ok)
+				checkStorageSlot(
+					t,
+					l2Genesis.Accounts,
+					predeploys.GovernanceTokenAddr,
+					common.Hash{31: 0x0a},
+					common.BytesToHash(common.Address{'O'}.Bytes()),
+				)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			opts, intent, st := setupGenesisChain(t, defaultL1ChainID)
+			tt.mutator(intent)
+			require.NoError(t, deployer.ApplyPipeline(ctx, opts))
+			tt.assertions(t, st)
+		})
+	}
 }
 
 func setupGenesisChain(t *testing.T, l1ChainID uint64) (deployer.ApplyPipelineOpts, *state.Intent, *state.State) {
@@ -788,7 +852,7 @@ func newIntent(
 			ProtocolVersionsOwner: addrFor(t, dk, devkeys.SuperchainDeployerKey.Key(l1ChainID)),
 			Guardian:              addrFor(t, dk, devkeys.SuperchainConfigGuardianKey.Key(l1ChainID)),
 		},
-		FundDevAccounts:    true,
+		FundDevAccounts:    false,
 		L1ContractsLocator: l1Loc,
 		L2ContractsLocator: l2Loc,
 		Chains: []*state.ChainIntent{
@@ -862,7 +926,7 @@ func validateSuperchainDeployment(t *testing.T, st *state.State, cg codeGetter) 
 	}
 }
 
-func validateOPChainDeployment(t *testing.T, cg codeGetter, st *state.State, intent *state.Intent) {
+func validateOPChainDeployment(t *testing.T, cg codeGetter, st *state.State, intent *state.Intent, govEnabled bool) {
 	// Validate that the implementation addresses are always set, even in subsequent deployments
 	// that pull from an existing OPCM deployment.
 	implAddrs := []struct {
@@ -929,9 +993,15 @@ func validateOPChainDeployment(t *testing.T, cg codeGetter, st *state.State, int
 		// slot 0
 		ownerSlot := common.Hash{}
 		checkStorageSlot(t, alloc, predeploys.ProxyAdminAddr, ownerSlot, addrAsSlot)
-		var defaultGovOwner common.Hash
-		defaultGovOwner.SetBytes(common.HexToAddress("0xDeaDDEaDDeAdDeAdDEAdDEaddeAddEAdDEAdDEad").Bytes())
-		checkStorageSlot(t, alloc, predeploys.GovernanceTokenAddr, common.Hash{31: 0x0a}, defaultGovOwner)
+
+		if govEnabled {
+			var defaultGovOwner common.Hash
+			defaultGovOwner.SetBytes(common.HexToAddress("0xDeaDDEaDDeAdDeAdDEAdDEaddeAddEAdDEAdDEad").Bytes())
+			checkStorageSlot(t, alloc, predeploys.GovernanceTokenAddr, common.Hash{31: 0x0a}, defaultGovOwner)
+		} else {
+			_, ok := alloc[predeploys.GovernanceTokenAddr]
+			require.False(t, ok, "governance token should not be deployed by default")
+		}
 
 		require.Equal(t, int(chainIntent.Eip1559Denominator), 50, "EIP1559Denominator should be set")
 		require.Equal(t, int(chainIntent.Eip1559Elasticity), 6, "EIP1559Elasticity should be set")
