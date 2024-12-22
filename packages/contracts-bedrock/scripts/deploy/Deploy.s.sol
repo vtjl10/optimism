@@ -128,8 +128,7 @@ contract Deploy is Deployer {
             SystemConfig: getAddress("SystemConfigProxy"),
             L1ERC721Bridge: getAddress("L1ERC721BridgeProxy"),
             ProtocolVersions: getAddress("ProtocolVersionsProxy"),
-            SuperchainConfig: getAddress("SuperchainConfigProxy"),
-            OPContractsManager: getAddress("OPContractsManager")
+            SuperchainConfig: getAddress("SuperchainConfigProxy")
         });
     }
 
@@ -149,8 +148,7 @@ contract Deploy is Deployer {
             SystemConfig: getAddress("SystemConfig"),
             L1ERC721Bridge: getAddress("L1ERC721Bridge"),
             ProtocolVersions: getAddress("ProtocolVersions"),
-            SuperchainConfig: getAddress("SuperchainConfig"),
-            OPContractsManager: getAddress("OPContractsManager")
+            SuperchainConfig: getAddress("SuperchainConfig")
         });
     }
 
@@ -362,6 +360,11 @@ contract Deploy is Deployer {
         ChainAssertions.checkMIPS({
             _mips: IMIPS(address(dio.mipsSingleton())),
             _oracle: IPreimageOracle(address(dio.preimageOracleSingleton()))
+        });
+        ChainAssertions.checkOPContractsManager({
+            _contracts: contracts,
+            _opcm: OPContractsManager(mustGetAddress("OPContractsManager")),
+            _mips: IMIPS(mustGetAddress("Mips"))
         });
         if (_isInterop) {
             ChainAssertions.checkSystemConfigInterop({ _contracts: contracts, _cfg: cfg, _isProxy: false });
@@ -1018,10 +1021,10 @@ contract Deploy is Deployer {
         console.log("resetting initialized value on %s Proxy", _contractName);
         address proxy = mustGetAddress(string.concat(_contractName, "Proxy"));
         StorageSlot memory slot = ForgeArtifacts.getInitializedSlot(_contractName);
-        bytes32 slotVal = vm.load(proxy, bytes32(vm.parseUint(slot.slot)));
+        bytes32 slotVal = vm.load(proxy, bytes32(slot.slot));
         uint256 value = uint256(slotVal);
         value = value & ~(0xFF << (slot.offset * 8));
         slotVal = bytes32(value);
-        vm.store(proxy, bytes32(vm.parseUint(slot.slot)), slotVal);
+        vm.store(proxy, bytes32(slot.slot), slotVal);
     }
 }
