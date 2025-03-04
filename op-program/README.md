@@ -12,7 +12,7 @@ on-chain VM as part of the dispute resolution process.
 To build op-program, from within the `op-program` directory run:
 
 ```shell
-make op-program
+just op-program
 ```
 
 This resulting executable will be in `./bin/op-program`
